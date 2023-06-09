@@ -115,8 +115,6 @@ pub struct Handler {
             Either<inbound_stop::FatalUpgradeError, outbound_hop::FatalUpgradeError>,
         >,
     >,
-    /// Until when to keep the connection alive.
-    keep_alive: KeepAlive,
 
     /// Queue of events to return when polled.
     queued_events: VecDeque<
@@ -134,10 +132,6 @@ pub struct Handler {
     ///
     /// Contains a [`futures::future::Future`] for each lend out substream that
     /// resolves once the substream is dropped.
-    ///
-    /// Once all substreams are dropped and this handler has no other work,
-    /// [`KeepAlive::Until`] can be set, allowing the connection to be closed
-    /// eventually.
     alive_lend_out_substreams: FuturesUnordered<oneshot::Receiver<void::Void>>,
 
     circuit_deny_futs:
@@ -162,7 +156,6 @@ impl Handler {
             alive_lend_out_substreams: Default::default(),
             circuit_deny_futs: Default::default(),
             send_error_futs: Default::default(),
-            keep_alive: KeepAlive::Yes,
         }
     }
 
@@ -438,7 +431,16 @@ impl ConnectionHandler for Handler {
     }
 
     fn connection_keep_alive(&self) -> KeepAlive {
-        self.keep_alive
+        if !matches!(self.reservation, Reservation::None)
+            || !self.alive_lend_out_substreams.is_empty()
+            || !self.circuit_deny_futs.is_empty()
+        {
+            return KeepAlive::Yes;
+        }
+
+        KeepAlive::No
+
+        // KeepAlive::Yes
     }
 
     fn poll(
@@ -502,22 +504,6 @@ impl ConnectionHandler for Handler {
                 Poll::Ready(Some(Ok(v))) => void::unreachable(v),
                 Poll::Ready(None) | Poll::Pending => break,
             }
-        }
-
-        // Update keep-alive handling.
-        if matches!(self.reservation, Reservation::None)
-            && self.alive_lend_out_substreams.is_empty()
-            && self.circuit_deny_futs.is_empty()
-        {
-            match self.keep_alive {
-                KeepAlive::Yes => {
-                    self.keep_alive = KeepAlive::Until(Instant::now() + Duration::from_secs(10));
-                }
-                KeepAlive::Until(_) => {}
-                KeepAlive::No => panic!("Handler never sets KeepAlive::No."),
-            }
-        } else {
-            self.keep_alive = KeepAlive::Yes;
         }
 
         Poll::Pending

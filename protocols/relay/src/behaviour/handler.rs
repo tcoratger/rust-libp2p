@@ -352,9 +352,6 @@ pub struct Handler {
         >,
     >,
 
-    /// Until when to keep the connection alive.
-    keep_alive: KeepAlive,
-
     /// Future handling inbound reservation request.
     reservation_request_future: Option<ReservationRequestFuture>,
     /// Timeout for the currently active reservation.
@@ -373,10 +370,6 @@ pub struct Handler {
     ///
     /// Contains a [`futures::future::Future`] for each lend out substream that
     /// resolves once the substream is dropped.
-    ///
-    /// Once all substreams are dropped and this handler has no other work,
-    /// [`KeepAlive::Until`] can be set, allowing the connection to be closed
-    /// eventually.
     alive_lend_out_substreams: FuturesUnordered<oneshot::Receiver<()>>,
     /// Futures relaying data for circuit between two peers.
     circuits: Futures<(CircuitId, PeerId, Result<(), std::io::Error>)>,
@@ -395,7 +388,6 @@ impl Handler {
             alive_lend_out_substreams: Default::default(),
             circuits: Default::default(),
             active_reservation: Default::default(),
-            keep_alive: KeepAlive::Yes,
         }
     }
 
@@ -665,7 +657,21 @@ impl ConnectionHandler for Handler {
     }
 
     fn connection_keep_alive(&self) -> KeepAlive {
-        self.keep_alive
+        if !self.queued_events.is_empty() {
+            return KeepAlive::Yes;
+        }
+
+        if self.reservation_request_future.is_some()
+            || !self.circuit_accept_futures.is_empty()
+            || !self.circuit_deny_futures.is_empty()
+            || !self.alive_lend_out_substreams.is_empty()
+            || !self.circuits.is_empty()
+            || self.active_reservation.is_some()
+        {
+            return KeepAlive::Yes;
+        }
+
+        KeepAlive::No
     }
 
     fn poll(
@@ -863,25 +869,6 @@ impl ConnectionHandler for Handler {
         while let Poll::Ready(Some(Err(Canceled))) =
             self.alive_lend_out_substreams.poll_next_unpin(cx)
         {}
-
-        // Check keep alive status.
-        if self.reservation_request_future.is_none()
-            && self.circuit_accept_futures.is_empty()
-            && self.circuit_deny_futures.is_empty()
-            && self.alive_lend_out_substreams.is_empty()
-            && self.circuits.is_empty()
-            && self.active_reservation.is_none()
-        {
-            match self.keep_alive {
-                KeepAlive::Yes => {
-                    self.keep_alive = KeepAlive::Until(Instant::now() + Duration::from_secs(10));
-                }
-                KeepAlive::Until(_) => {}
-                KeepAlive::No => panic!("Handler never sets KeepAlive::No."),
-            }
-        } else {
-            self.keep_alive = KeepAlive::Yes;
-        }
 
         Poll::Pending
     }
